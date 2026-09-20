@@ -1,4 +1,5 @@
-
+// Small inline icon set, ported 1:1 from the paths used in the Claude Design
+// mockup (Venpa Connections.dc.html) so the UI matches pixel-for-pixel.
 import React from 'react';
 
 export const SparkleIcon = (props) => (

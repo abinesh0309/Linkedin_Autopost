@@ -1,5 +1,7 @@
 import React, { useState } from 'react';
-import { getApiBaseUrl, setApiBaseUrl, normalizeApiUrl, checkHealth } from '../services/api.js';
+import {
+  getApiBaseUrl, setApiBaseUrl, normalizeApiUrl, checkHealth, getAccessCode, setAccessCode, verifyAccessCode, isBackendRequired,
+} from '../services/api.js';
 
 const inputStyle = {
   width: '100%', maxWidth: 480, boxSizing: 'border-box', padding: '13px 16px',
@@ -9,7 +11,9 @@ const inputStyle = {
 };
 
 export default function SettingsView({ onChanged, onSaved }) {
+  const requireBackend = isBackendRequired();
   const [url, setUrl] = useState(getApiBaseUrl());
+  const [code, setCode] = useState(getAccessCode());
   const [status, setStatus] = useState(null); // null | 'checking' | 'ok' | 'fail'
   const [statusDetail, setStatusDetail] = useState('');
   const [copied, setCopied] = useState(false);
@@ -23,6 +27,7 @@ export default function SettingsView({ onChanged, onSaved }) {
       return null;
     }
     setApiBaseUrl(result.url);
+    setAccessCode(code);
     setUrl(result.url);
     return result.url;
   }
@@ -35,11 +40,23 @@ export default function SettingsView({ onChanged, onSaved }) {
     if (onChanged) onChanged();
     const result = await checkHealth();
     if (result.ok) {
-      setStatus('ok');
-      setStatusDetail(result.data?.gpu ? `Connected — ${result.data.gpu}` : 'Connected to the backend.');
+      const gpuLine = result.data?.gpu ? `Connected \u2014 ${result.data.gpu}` : 'Connected to the backend.';
+      if (result.data?.auth_required) {
+        try {
+          await verifyAccessCode();
+          setStatus('ok');
+          setStatusDetail(`${gpuLine} Access code accepted.`);
+        } catch {
+          setStatus('fail');
+          setStatusDetail('The backend is reachable, but the access code is missing or wrong.');
+        }
+      } else {
+        setStatus('ok');
+        setStatusDetail(gpuLine);
+      }
     } else if (result.reason === 'no_url') {
       setStatus('fail');
-      setStatusDetail('Paste the Public API URL first, or leave it empty to stay in demo mode.');
+      setStatusDetail(requireBackend ? 'Paste the Public API URL first.' : 'Paste the Public API URL first, or leave it empty to stay in demo mode.');
     } else {
       setStatus('fail');
       setStatusDetail("Can't reach that URL. Make sure the Kaggle tab is open, the API cell (section 6) is still running, and you copied the URL exactly as it was printed.");
@@ -53,7 +70,9 @@ export default function SettingsView({ onChanged, onSaved }) {
 
   function handleClear() {
     setApiBaseUrl('');
-    setUrl('');
+    setAccessCode('');
+    setCode('');
+    setUrl(requireBackend ? getApiBaseUrl() : '');
     setStatus(null);
     if (onChanged) onChanged();
   }
@@ -80,7 +99,10 @@ export default function SettingsView({ onChanged, onSaved }) {
         Backend connection
       </h1>
       <p style={{ fontFamily: 'var(--font-body)', fontSize: '15px', lineHeight: 1.6, color: 'rgba(32,31,29,.65)', margin: '0 0 26px', maxWidth: 580 }}>
-        Paste the <strong>Public API URL</strong> printed by the Server.
+        Paste the <strong>Public API URL</strong> printed by the last cell (section 6) of the
+        Kaggle notebook. It changes every time the Kaggle session restarts (unless you use a reserved
+        ngrok domain), so re-paste it here when that happens. It is saved in this browser and takes
+        effect immediately.{requireBackend ? '' : ' Leave it empty to explore the app in demo mode with simulated data.'}
       </p>
 
       <label htmlFor="api-url" style={{ display: 'block', fontFamily: 'var(--font-heading)', fontSize: 13, fontWeight: 600, marginBottom: 8, color: 'var(--color-text)' }}>
@@ -97,10 +119,23 @@ export default function SettingsView({ onChanged, onSaved }) {
         style={inputStyle}
       />
 
+      <label htmlFor="access-code" style={{ display: 'block', fontFamily: 'var(--font-heading)', fontSize: 13, fontWeight: 600, marginBottom: 8, color: 'var(--color-text)' }}>
+        Access code <span style={{ fontWeight: 400, color: 'rgba(32,31,29,.55)' }}>(only if the backend has one set)</span>
+      </label>
+      <input
+        id="access-code"
+        className="vc-textarea"
+        type="password"
+        value={code}
+        onChange={(e) => setCode(e.target.value)}
+        autoComplete="off"
+        style={inputStyle}
+      />
+
       <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginBottom: 20, flexWrap: 'wrap' }}>
         <button className="btn btn-primary" onClick={handleSave}>Save</button>
         <button className="btn btn-secondary" onClick={handleTest}>Test connection</button>
-        {hasUrl && <button className="btn btn-ghost" onClick={handleClear}>Clear (demo mode)</button>}
+        {hasUrl && <button className="btn btn-ghost" onClick={handleClear}>{requireBackend ? 'Reset' : 'Clear (demo mode)'}</button>}
       </div>
 
       {status && (
@@ -115,7 +150,25 @@ export default function SettingsView({ onChanged, onSaved }) {
         </div>
       )}
 
+      <div className="hr" />
 
+      <div className="card-kicker" style={{ color: 'var(--color-accent-700)', marginBottom: 8 }}>Open on another device</div>
+      <p style={{ fontSize: '14px', lineHeight: 1.6, color: 'rgba(32,31,29,.65)', maxWidth: 580, margin: '0 0 12px' }}>
+        Copy a link that opens this site already connected to the backend above &mdash; useful on
+        your phone or for sending a reviewer a working link while the notebook is running.
+      </p>
+      <button className="btn btn-secondary" onClick={copyLink} disabled={!hasUrl}>
+        {copied ? 'Link copied' : 'Copy connection link'}
+      </button>
+
+      <div className="hr" />
+
+      <div className="card-kicker" style={{ color: 'var(--color-accent-700)', marginBottom: 8 }}>If you see &ldquo;Failed to fetch&rdquo;</div>
+      <p style={{ fontSize: '14px', lineHeight: 1.6, color: 'rgba(32,31,29,.65)', maxWidth: 580 }}>
+        This almost always means the Kaggle notebook (or its API cell) isn&apos;t running anymore, the
+        URL above is stale from a previous restart, or the browser blocked the request. Use Test
+        connection to find out which before regenerating a post.
+      </p>
     </div>
   );
 }

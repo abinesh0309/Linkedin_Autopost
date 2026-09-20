@@ -1,16 +1,23 @@
 // API client for the Kaggle-hosted backend (FastAPI behind an ngrok tunnel).
 //
 // Backend contract:
-//   GET  /health                 -> { status, gpu, jobs_in_progress, time }
-//   POST /jobs { topic }         -> { job_id }
+//   GET  /health                 -> { status, gpu, gpu_status: { busy, topic?, progress?, ... }, auth_required, time }
+//   GET  /auth                   -> { ok }            (verifies the access code)
+//   POST /jobs { topic }         -> { job_id, owner_token }   (409 while the GPU is in use)
+//   GET  /jobs                   -> [ every run: { id, stage, progress, topic, caption?, video_url?, post_url?, error?, created_at } ]
 //   GET  /jobs/{id}              -> { stage, progress, caption?, hashtags?, video_url?, error?, stalled? }
+//   POST /jobs/{id}/heartbeat    { owner_token }   keeps a run alive while its page is open
+//   POST /jobs/{id}/leave        { owner_token }   the page is closing: stop soon unless it comes back
+//   POST /jobs/{id}/cancel       { owner_token }   stop the run and free the GPU
 //   POST /jobs/{id}/publish      -> { stage: 'publishing' }
-//   GET  /posts                  -> [{ id, topic, date, status, thumbnail_url? }]
+//   GET  /posts                  -> [{ id, topic, date, status }]
 //
 // With no backend URL configured the app runs in demo mode: every call below
-// is simulated locally, so a freshly deployed site is always clickable.
+// is simulated locally, so a freshly deployed site is always clickable - unless
+// the build sets VITE_REQUIRE_BACKEND=true, which removes demo mode entirely.
 
 const API_BASE_URL_KEY = 'vc_api_base_url';
+const ACCESS_CODE_KEY = 'vc_access_code';
 
 const DEFAULT_TIMEOUT_MS = 30000;
 const HEALTH_TIMEOUT_MS = 8000;
@@ -19,11 +26,12 @@ const MAX_POLL_FAILURES = 6;
 const MAX_POLL_BACKOFF_MS = 8000;
 
 export class ApiError extends Error {
-  constructor(message, { status = 0, network = false } = {}) {
+  constructor(message, { status = 0, network = false, gpuStatus = null } = {}) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
     this.network = network;
+    this.gpuStatus = gpuStatus;
   }
 }
 
@@ -60,6 +68,45 @@ export function normalizeApiUrl(input) {
   return { ok: true, url: `${parsed.origin}${parsed.pathname}`.replace(/\/+$/, '') };
 }
 
+/** The address baked into this build (VITE_API_BASE_URL), if any. */
+export function getDefaultApiUrl() {
+  return (import.meta.env.VITE_API_BASE_URL || '').replace(/\/+$/, '');
+}
+
+/** True when the URL saved in this browser differs from the build's default. */
+export function hasCustomApiUrl() {
+  try {
+    const stored = (localStorage.getItem(API_BASE_URL_KEY) || '').replace(/\/+$/, '');
+    return Boolean(stored) && stored !== getDefaultApiUrl();
+  } catch {
+    return false;
+  }
+}
+
+export function getAccessCode() {
+  try {
+    return localStorage.getItem(ACCESS_CODE_KEY) || '';
+  } catch {
+    return '';
+  }
+}
+
+export function setAccessCode(code) {
+  const clean = (code || '').trim();
+  try {
+    if (clean) localStorage.setItem(ACCESS_CODE_KEY, clean);
+    else localStorage.removeItem(ACCESS_CODE_KEY);
+  } catch {
+    // Best-effort only.
+  }
+  return clean;
+}
+
+function accessHeaders() {
+  const code = getAccessCode();
+  return code ? { 'X-Access-Code': code } : {};
+}
+
 export function getApiBaseUrl() {
   try {
     const stored = localStorage.getItem(API_BASE_URL_KEY);
@@ -67,7 +114,7 @@ export function getApiBaseUrl() {
   } catch {
     // localStorage unavailable (private mode, blocked storage) - use the build-time default.
   }
-  return (import.meta.env.VITE_API_BASE_URL || '').replace(/\/+$/, '');
+  return getDefaultApiUrl();
 }
 
 export function setApiBaseUrl(url) {
@@ -106,9 +153,18 @@ function forcedMockMode() {
   return (import.meta.env.VITE_MOCK_MODE ?? '') === 'true';
 }
 
+/**
+ * VITE_REQUIRE_BACKEND=true removes demo mode: the site shows "connect the
+ * backend" until the Kaggle API answers, and never simulates anything.
+ */
+export function isBackendRequired() {
+  return (import.meta.env.VITE_REQUIRE_BACKEND ?? '') === 'true';
+}
+
 // Read this fresh instead of caching it, so switching between demo and live
 // mode from Settings takes effect on the very next action.
 export function isMockModeActive() {
+  if (isBackendRequired()) return false;
   if (forcedMockMode()) return true;
   return !getApiBaseUrl();
 }
@@ -134,6 +190,7 @@ async function request(path, options = {}) {
         // Skips ngrok's free-tier browser-warning interstitial, which has no
         // CORS headers and otherwise surfaces as an opaque "Failed to fetch".
         'ngrok-skip-browser-warning': 'true',
+        ...accessHeaders(),
         ...(headers || {}),
       },
       signal: controller.signal,
@@ -154,14 +211,22 @@ async function request(path, options = {}) {
 
   if (!res.ok) {
     let detail = res.statusText || 'Request failed';
+    let gpuStatus = null;
     try {
       const body = await res.json();
       const raw = body.detail ?? body.error ?? detail;
-      detail = typeof raw === 'string' ? raw : JSON.stringify(raw);
+      if (raw && typeof raw === 'object' && raw.message) {
+        detail = raw.message;
+        gpuStatus = raw.gpu_status || null;
+      } else {
+        detail = typeof raw === 'string' ? raw : JSON.stringify(raw);
+      }
     } catch {
       // Response wasn't JSON - keep statusText.
     }
-    throw new ApiError(`${res.status}: ${detail}`, { status: res.status });
+    // 401 / 409 carry a sentence written for people; other codes keep the status for debugging.
+    const message = res.status === 401 || res.status === 409 ? detail : `${res.status}: ${detail}`;
+    throw new ApiError(message, { status: res.status, gpuStatus });
   }
   return res.json();
 }
@@ -186,6 +251,11 @@ export async function checkHealth() {
   } finally {
     clearTimeout(timer);
   }
+}
+
+/** Verifies the saved access code against the backend. Resolves when accepted. */
+export async function verifyAccessCode() {
+  return request('/auth', { timeoutMs: HEALTH_TIMEOUT_MS });
 }
 
 /**
@@ -300,19 +370,19 @@ function mockPipeline(topic, onUpdate) {
 
 // ---- Public API -------------------------------------------------------------
 
-/** POST /jobs { topic } -> { job_id } */
+/** POST /jobs { topic } -> { job_id, owner_token }. Rejects with status 409 while the GPU is in use. */
 export async function createJob(topic) {
   if (isMockModeActive()) return { job_id: `mock-${Date.now()}` };
   return request('/jobs', { method: 'POST', body: JSON.stringify({ topic }) });
 }
 
 /**
- * Polls a job until it is 'done', 'error' or 'posted'. Calls onUpdate on every
+ * Polls a job until it is 'done', 'error', 'cancelled' or 'posted'. Calls onUpdate on every
  * poll (the payload can also be a resumed job that is already 'publishing').
  */
 export function pollJob(jobId, onUpdate, { mockTopic } = {}) {
   if (isMockModeActive()) return mockPipeline(mockTopic || '', onUpdate);
-  return createPoller(jobId, (d) => ['done', 'error', 'posted'].includes(d.stage), onUpdate);
+  return createPoller(jobId, (d) => ['done', 'error', 'posted', 'cancelled'].includes(d.stage), onUpdate);
 }
 
 /** POST /jobs/{id}/publish -> { stage: 'publishing' } */
@@ -330,17 +400,104 @@ export function pollPublish(jobId, onUpdate) {
   return createPoller(jobId, (d) => d.stage === 'posted' || d.stage === 'error', onUpdate);
 }
 
+// ---- Run ownership: heartbeat, leave, cancel ---------------------------------
+// The backend gives whoever starts a run an owner token. While the run is on the
+// GPU the page pings /heartbeat; if the pings stop (tab closed, connection lost)
+// the backend stops the run and frees the GPU for the next visitor.
+
+export function heartbeatJob(jobId, ownerToken) {
+  return request(`/jobs/${jobId}/heartbeat`, { method: 'POST', body: JSON.stringify({ owner_token: ownerToken }), timeoutMs: HEALTH_TIMEOUT_MS });
+}
+
+export function cancelJob(jobId, ownerToken) {
+  return request(`/jobs/${jobId}/cancel`, { method: 'POST', body: JSON.stringify({ owner_token: ownerToken }) });
+}
+
+/**
+ * Fire-and-forget notice that the page is unloading. `keepalive` lets the
+ * request finish after the page is gone; if it is lost anyway, the heartbeat
+ * lease on the backend expires and stops the run a little later.
+ */
+export function leaveJob(jobId, ownerToken) {
+  const baseUrl = getApiBaseUrl();
+  if (!baseUrl || !jobId || !ownerToken) return;
+  try {
+    fetch(`${baseUrl}/jobs/${jobId}/leave`, {
+      method: 'POST',
+      keepalive: true,
+      headers: { 'Content-Type': 'application/json', 'ngrok-skip-browser-warning': 'true', ...accessHeaders() },
+      body: JSON.stringify({ owner_token: ownerToken }),
+    }).catch(() => {});
+  } catch {
+    // Nothing else to do while unloading.
+  }
+}
+
+// ---- History: every run the backend knows about ------------------------------
+
+const RUNNING_STAGES = ['planning', 'generating_video', 'finalizing'];
+
+const STATUS_BY_STAGE = {
+  planning: { label: 'Generating', tone: 'outline' },
+  generating_video: { label: 'Generating', tone: 'outline' },
+  finalizing: { label: 'Generating', tone: 'outline' },
+  done: { label: 'Ready to review', tone: 'accent' },
+  publishing: { label: 'Posting', tone: 'outline' },
+  posted: { label: 'Posted', tone: 'accent' },
+  error: { label: 'Failed', tone: 'danger' },
+  cancelled: { label: 'Stopped', tone: 'muted' },
+};
+
+function formatRunDate(seconds) {
+  if (!seconds) return '';
+  return new Date(seconds * 1000).toLocaleString('en-IN', { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' });
+}
+
+function normalizeRun(job) {
+  const status = STATUS_BY_STAGE[job.stage] || { label: job.stage || 'Unknown', tone: 'muted' };
+  return {
+    id: job.id,
+    topic: job.topic || 'Untitled post',
+    date: formatRunDate(job.created_at || job.updated_at),
+    sortKey: job.created_at || job.updated_at || 0,
+    stage: job.stage,
+    running: RUNNING_STAGES.includes(job.stage),
+    status: status.label,
+    tone: status.tone,
+    progress: job.progress ?? 0,
+    caption: job.caption || '',
+    videoUrl: job.video_url || null,
+    postUrl: job.post_url || null,
+    error: job.error || '',
+    source: job.source || 'visitor',
+    thumbnailUrl: null,
+  };
+}
+
 function normalizePost(post, index) {
   return {
     id: post.id ?? `${post.date || 'post'}-${index}`,
     topic: post.topic || 'Untitled post',
     date: post.date || '',
+    sortKey: 0,
+    stage: 'posted',
+    running: false,
     status: post.status || 'Posted',
+    tone: 'accent',
+    progress: 100,
+    caption: '',
+    videoUrl: null,
+    postUrl: null,
+    error: '',
+    source: 'visitor',
     thumbnailUrl: post.thumbnailUrl || post.thumbnail_url || null,
   };
 }
 
-/** GET /posts -> post history */
+/**
+ * GET /jobs (every run, including ones in progress and failed ones) merged with
+ * GET /posts (older posted entries the backend saved before /jobs existed).
+ */
 export async function listPosts() {
   if (isMockModeActive()) {
     return [
@@ -349,8 +506,15 @@ export async function listPosts() {
       { id: 3, topic: 'Pongal festival post', date: 'Jan 14, 2026', status: 'Posted' },
     ].map(normalizePost);
   }
-  const data = await request('/posts');
-  return Array.isArray(data) ? data.map(normalizePost) : [];
+  const [jobsResult, postsResult] = await Promise.allSettled([request('/jobs'), request('/posts')]);
+  if (jobsResult.status === 'rejected' && postsResult.status === 'rejected') throw jobsResult.reason;
+
+  const runs = jobsResult.status === 'fulfilled' && Array.isArray(jobsResult.value) ? jobsResult.value.map(normalizeRun) : [];
+  const known = new Set(runs.map((run) => String(run.id)));
+  const older = postsResult.status === 'fulfilled' && Array.isArray(postsResult.value)
+    ? postsResult.value.map(normalizePost).filter((post) => !known.has(String(post.id)))
+    : [];
+  return [...runs, ...older];
 }
 
 // ---- Shared schedule (backend section 5b) -----------------------------------

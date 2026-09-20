@@ -11,10 +11,11 @@ const formatDay = (key) =>
   new Date(`${key}T00:00:00`).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' });
 
 export default function NewPostView({
-  prompt, setPrompt, onGenerate, error, backendOnline, mockMode, onOpenSettings,
+  prompt, setPrompt, onGenerate, error, backendOnline, mockMode, onOpenSettings, gpuStatus = null, needsCode = false,
   dueItems = [], readyItems = [], linkedItem = null, onUseScheduled, onReviewScheduled, onOpenSchedule,
 }) {
-  const disabled = !prompt.trim();
+  const gpuBusy = Boolean(gpuStatus && gpuStatus.busy);
+  const disabled = !prompt.trim() || gpuBusy || needsCode;
 
   return (
     <div>
@@ -33,6 +34,30 @@ export default function NewPostView({
             Can&apos;t reach the Kaggle backend right now.{' '}
             <button type="button" className="vc-link" onClick={onOpenSettings}>Check the connection in Settings</button>{' '}
             before generating &mdash; otherwise the request will fail partway through.
+          </div>
+        </div>
+      )}
+
+      {!mockMode && backendOnline && needsCode && (
+        <div className="vc-alert vc-alert-error" role="alert">
+          <span className="vc-alert-dot" />
+          <div>
+            This backend asks for an access code.{' '}
+            <button type="button" className="vc-link" onClick={onOpenSettings}>Enter it in Settings</button>.
+          </div>
+        </div>
+      )}
+
+      {gpuBusy && (
+        <div className="vc-alert vc-alert-accent" role="status">
+          <span className="vc-alert-dot" />
+          <div>
+            <strong style={{ fontWeight: 600 }}>The GPU is in use.</strong>{' '}
+            {gpuStatus.source === 'schedule' ? 'A scheduled post is being generated' : 'Someone else is generating'}
+            {gpuStatus.topic ? <> &ldquo;{gpuStatus.topic}&rdquo;</> : null}
+            {' '}&mdash; {Math.round(gpuStatus.progress || 0)}% done. You can start yours as soon as it finishes;
+            this page updates by itself.
+            <div className="vc-meter" aria-hidden="true"><div style={{ width: `${Math.min(100, Math.round(gpuStatus.progress || 0))}%` }} /></div>
           </div>
         </div>
       )}
@@ -113,7 +138,7 @@ export default function NewPostView({
 
       <button className="btn btn-primary" disabled={disabled} onClick={onGenerate} style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
         <GenerateSparkleIcon />
-        Generate post
+        {gpuBusy ? 'Waiting for the GPU' : 'Generate post'}
       </button>
     </div>
   );

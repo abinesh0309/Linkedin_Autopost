@@ -8,9 +8,18 @@ const NAV_ITEMS = [
   { key: 'settings', label: 'Settings', Icon: SettingsIcon },
 ];
 
-export default function Sidebar({ view, onNavigate, backendOnline, mockMode, dueCount = 0 }) {
-  const statusColor = mockMode ? '#bab6b6' : backendOnline ? '#3fb96f' : '#c0392b';
-  const statusLabel = mockMode ? 'Demo mode (no backend set)' : backendOnline ? 'Backend connected' : 'Backend unreachable';
+export default function Sidebar({ view, onNavigate, backendOnline, mockMode, dueCount = 0, gpuStatus = null, gpuIsMine = false, needsCode = false }) {
+  const statusColor = mockMode ? '#bab6b6' : backendOnline ? (needsCode ? '#b68235' : '#3fb96f') : '#c0392b';
+  const statusLabel = mockMode
+    ? 'Demo mode (no backend set)'
+    : backendOnline
+      ? (needsCode ? 'Access code needed' : 'Backend connected')
+      : 'Backend unreachable';
+  const showGpu = !mockMode && backendOnline && !needsCode && gpuStatus;
+  const gpuBusy = showGpu && gpuStatus.busy;
+  const gpuLabel = gpuBusy
+    ? `GPU in use${gpuIsMine ? ' (your run)' : ''} \u00b7 ${Math.round(gpuStatus.progress || 0)}%`
+    : 'GPU free';
 
   return (
     <header className="vc-sidebar">
@@ -37,10 +46,18 @@ export default function Sidebar({ view, onNavigate, backendOnline, mockMode, due
         ))}
       </nav>
 
-      <button type="button" className="vc-status" onClick={() => onNavigate('settings')} title="Open Settings">
-        <span className="vc-status-dot" style={{ background: statusColor }} />
-        <span className="vc-status-label" role="status">{statusLabel}</span>
-      </button>
+      <div className="vc-status-wrap">
+        {showGpu && (
+          <div className="vc-gpu" role="status" title={gpuBusy ? `Generating: ${gpuStatus.topic || ''}` : 'The GPU is idle'}>
+            <span className={`vc-gpu-dot${gpuBusy ? ' is-busy' : ''}`} aria-hidden="true" />
+            <span className="vc-status-label">{gpuLabel}</span>
+          </div>
+        )}
+        <button type="button" className="vc-status" onClick={() => onNavigate('settings')} title="Open Settings">
+          <span className="vc-status-dot" style={{ background: statusColor }} />
+          <span className="vc-status-label" role="status">{statusLabel}</span>
+        </button>
+      </div>
     </header>
   );
 }

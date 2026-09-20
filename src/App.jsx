@@ -5,9 +5,10 @@ import ProgressView from './components/ProgressView.jsx';
 import ReviewView from './components/ReviewView.jsx';
 import PublishingView from './components/PublishingView.jsx';
 import PostedView from './components/PostedView.jsx';
+import ConnectGate from './components/ConnectGate.jsx';
 import {
-  createJob, pollJob, publishJob, pollPublish, listPosts, isMockModeActive, checkHealth,
-  getRemoteSchedule, putRemoteSchedule,
+  createJob, pollJob, publishJob, pollPublish, listPosts, isMockModeActive, isBackendRequired, checkHealth,
+  verifyAccessCode, heartbeatJob, cancelJob, leaveJob, getRemoteSchedule, putRemoteSchedule,
 } from './services/api.js';
 import { loadSchedule, saveSchedule, toDateKey, compareItems } from './services/schedule.js';
 
@@ -18,7 +19,9 @@ const ScheduleView = lazy(() => import('./components/ScheduleView.jsx'));
 const SettingsView = lazy(() => import('./components/SettingsView.jsx'));
 
 const ACTIVE_JOB_KEY = 'vc_active_job';
-const HEALTH_INTERVAL_MS = 20000;
+const HEALTH_INTERVAL_MS = 6000;      // also drives the "GPU in use" banner for other visitors
+const HEARTBEAT_INTERVAL_MS = 10000;  // tells the backend the page that started a run is still open
+const HISTORY_REFRESH_MS = 5000;
 const SCHEDULE_SYNC_INTERVAL_MS = 30000;
 
 // The in-flight job survives a page refresh (sessionStorage), so an accidental
@@ -59,6 +62,12 @@ export default function App({ initialNotice = '' }) {
   const [posts, setPosts] = useState([]);
   const [postsState, setPostsState] = useState('loading'); // 'loading' | 'ready' | 'error'
   const [backendOnline, setBackendOnline] = useState(false);
+  const [healthChecked, setHealthChecked] = useState(false);
+  const [everConnected, setEverConnected] = useState(false); // connected at least once since this page loaded
+  const [lastCheckAt, setLastCheckAt] = useState(0);
+  const [needsCode, setNeedsCode] = useState(false);
+  const [gpuStatus, setGpuStatus] = useState(null);
+  const [stopping, setStopping] = useState(false);
   // Bumped whenever the backend URL changes so health + history re-check.
   const [apiVersion, setApiVersion] = useState(0);
 
@@ -70,7 +79,12 @@ export default function App({ initialNotice = '' }) {
   const [syncState, setSyncState] = useState('local');
 
   const cancelPollRef = useRef(null);
-  const jobRef = useRef({ id: null, topic: '', scheduleId: null });
+  const jobRef = useRef({ id: null, topic: '', scheduleId: null, ownerToken: null });
+  const flowStepRef = useRef('input');
+  const stoppingRef = useRef(false);
+  const failuresRef = useRef(0);
+  const authOkRef = useRef(false);
+  const everOnlineRef = useRef(false);
   const scheduleRef = useRef(schedule);
   scheduleRef.current = schedule;
   const editSeqRef = useRef(0);       // bumps on every local edit
@@ -79,6 +93,8 @@ export default function App({ initialNotice = '' }) {
   const firstSyncRef = useRef(false);
   const pushTimerRef = useRef(null);
 
+  flowStepRef.current = flowStep;
+  const requireBackend = isBackendRequired();
   const mockMode = useMemo(() => isMockModeActive(), [apiVersion]);
   const todayKey = toDateKey();
   const dueItems = schedule
@@ -88,6 +104,12 @@ export default function App({ initialNotice = '' }) {
   const attentionCount = dueItems.length + readyItems.length;
   const linkedItem = schedule.find((item) => item.id === activeScheduleId) || null;
   const busy = flowStep === 'progress' || flowStep === 'publishing';
+  // Someone else's run is on the GPU (a run of mine is shown in the progress view instead).
+  const gpuBusyByOther = Boolean(gpuStatus && gpuStatus.busy && gpuStatus.job_id !== jobRef.current.id);
+  const connState = !healthChecked ? 'checking' : !backendOnline ? 'offline' : needsCode ? 'needs_code' : 'online';
+  // A run in flight keeps the app on screen through a short connection blip - but only
+  // once we have been connected; a page that reloads while the backend is down shows the gate.
+  const showGate = requireBackend && connState !== 'online' && !(busy && everConnected);
 
   // ---- Polling plumbing (only touches setters and refs, so it is safe to call
   // from callbacks created on an earlier render) --------------------------------
@@ -104,7 +126,10 @@ export default function App({ initialNotice = '' }) {
     writeActiveJob(null);
     setPostUrl(data.post_url || null);
     const { topic, scheduleId } = jobRef.current;
-    setPosts((prev) => [{ id: `local-${Date.now()}`, topic, date: 'Just now', status: 'Posted', thumbnailUrl: null }, ...prev]);
+    setPosts((prev) => [{
+      id: `local-${Date.now()}`, topic, date: 'Just now', stage: 'posted', running: false, status: 'Posted', tone: 'accent',
+      progress: 100, caption: '', videoUrl: null, postUrl: data.post_url || null, error: '', source: 'visitor', thumbnailUrl: null,
+    }, ...prev]);
     if (scheduleId) {
       commitSchedule((prev) => prev.map((item) => (item.id === scheduleId ? { ...item, status: 'posted', postedAt: Date.now() } : item)));
     }
@@ -129,6 +154,16 @@ export default function App({ initialNotice = '' }) {
   }
 
   function handleGenerateUpdate(data) {
+    if (data.stage === 'cancelled') {
+      stopPolling();
+      writeActiveJob(null);
+      if (stoppingRef.current) setNotice('Generation stopped. The GPU is free.');
+      else setError(data.error || 'This run was stopped.');
+      stoppingRef.current = false;
+      setStopping(false);
+      setFlowStep('input');
+      return;
+    }
     if (data.stage === 'error') {
       stopPolling();
       writeActiveJob(null);
@@ -228,20 +263,58 @@ export default function App({ initialNotice = '' }) {
 
   // ---- Effects ---------------------------------------------------------------
 
-  useEffect(() => { loadPosts(); }, [loadPosts, apiVersion]);
+  // Reload history whenever the connection is (re)established, and keep it fresh
+  // while the History screen is open so other visitors' runs show up live.
+  const readyForData = mockMode || (backendOnline && !needsCode);
+  useEffect(() => { if (readyForData) loadPosts(); }, [loadPosts, apiVersion, readyForData]);
+  useEffect(() => {
+    if (view !== 'history' || mockMode || !readyForData) return undefined;
+    const interval = setInterval(() => { if (!document.hidden) loadPosts({ silent: true }); }, HISTORY_REFRESH_MS);
+    return () => clearInterval(interval);
+  }, [view, mockMode, readyForData, loadPosts]);
 
   // Keeps the sidebar dot honest without hammering the backend: pauses while
-  // the tab is hidden and re-checks the moment it becomes visible again.
+  // the tab is hidden and re-checks the moment it becomes visible again. The
+  // same response says whether the GPU is in use, so every visitor sees it.
   useEffect(() => {
     let cancelled = false;
+    failuresRef.current = 0;
+    authOkRef.current = false;
+    everOnlineRef.current = false;
+    setHealthChecked(false);
     async function check() {
       if (document.hidden) return;
       if (isMockModeActive()) {
-        if (!cancelled) setBackendOnline(false);
+        if (!cancelled) { setBackendOnline(false); setGpuStatus(null); setHealthChecked(true); }
         return;
       }
       const result = await checkHealth();
-      if (!cancelled) setBackendOnline(result.ok);
+      if (cancelled) return;
+      setLastCheckAt(Date.now());
+      if (!result.ok) {
+        failuresRef.current += 1;
+        // One dropped request is not an outage once we were connected.
+        if (failuresRef.current >= 2 || !everOnlineRef.current) { setBackendOnline(false); setGpuStatus(null); }
+        setHealthChecked(true);
+        return;
+      }
+      failuresRef.current = 0;
+      everOnlineRef.current = true;
+      setEverConnected(true);
+      setGpuStatus(result.data.gpu_status || { busy: false });
+      if (result.data.auth_required && !authOkRef.current) {
+        try {
+          await verifyAccessCode();
+          authOkRef.current = true;
+        } catch (err) {
+          if (cancelled) return;
+          if (err && err.status === 401) { setNeedsCode(true); setBackendOnline(true); setHealthChecked(true); return; }
+        }
+      }
+      if (cancelled) return;
+      setNeedsCode(false);
+      setBackendOnline(true);
+      setHealthChecked(true);
     }
     check();
     const interval = setInterval(check, HEALTH_INTERVAL_MS);
@@ -253,12 +326,42 @@ export default function App({ initialNotice = '' }) {
     };
   }, [apiVersion]);
 
+  // While a run started from this page is on the GPU, keep telling the backend
+  // the page is still here. If the page closes or the pings stop, the backend
+  // cancels the run instead of burning GPU time for nobody.
+  useEffect(() => {
+    if (flowStep !== 'progress' || mockMode) return undefined;
+    const beat = () => {
+      const { id, ownerToken } = jobRef.current;
+      if (id && ownerToken) heartbeatJob(id, ownerToken).catch(() => {});
+    };
+    const onVisible = () => { if (!document.hidden) beat(); };
+    beat();
+    const interval = setInterval(beat, HEARTBEAT_INTERVAL_MS);
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('pageshow', beat);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('pageshow', beat);
+    };
+  }, [flowStep, mockMode]);
+
+  useEffect(() => {
+    const onLeave = () => {
+      const { id, ownerToken } = jobRef.current;
+      if (flowStepRef.current === 'progress' && id && ownerToken && !isMockModeActive()) leaveJob(id, ownerToken);
+    };
+    window.addEventListener('pagehide', onLeave);
+    return () => window.removeEventListener('pagehide', onLeave);
+  }, []);
+
   // Resume a job that was running when the page was refreshed.
   useEffect(() => {
     const saved = readActiveJob();
     if (!saved || !saved.jobId) return;
     if (isMockModeActive()) { writeActiveJob(null); return; }
-    jobRef.current = { id: saved.jobId, topic: saved.prompt || '', scheduleId: saved.scheduleId || null };
+    jobRef.current = { id: saved.jobId, topic: saved.prompt || '', scheduleId: saved.scheduleId || null, ownerToken: saved.ownerToken || null };
     setPrompt(saved.prompt || '');
     setActiveScheduleId(saved.scheduleId || null);
     if (saved.phase === 'publishing') {
@@ -286,7 +389,7 @@ export default function App({ initialNotice = '' }) {
       clearTimeout(pushTimerRef.current);
       document.removeEventListener('visibilitychange', tick);
     };
-  }, [apiVersion]);
+  }, [apiVersion, backendOnline]);
 
   useEffect(() => {
     if (!notice) return undefined;
@@ -303,18 +406,38 @@ export default function App({ initialNotice = '' }) {
     setError('');
     setPublishError('');
     setStalled(false);
+    stoppingRef.current = false;
+    setStopping(false);
+    jobRef.current = { id: null, topic, scheduleId: activeScheduleId, ownerToken: null };
     setFlowStep('progress');
     setStage('planning');
     setProgress(0);
 
     try {
-      const { job_id } = await createJob(topic);
-      jobRef.current = { id: job_id, topic, scheduleId: activeScheduleId };
-      writeActiveJob({ jobId: job_id, prompt: topic, scheduleId: activeScheduleId, phase: 'generating' });
+      const { job_id, owner_token: ownerToken = null } = await createJob(topic);
+      jobRef.current = { id: job_id, topic, scheduleId: activeScheduleId, ownerToken };
+      writeActiveJob({ jobId: job_id, prompt: topic, scheduleId: activeScheduleId, phase: 'generating', ownerToken });
       cancelPollRef.current = pollJob(job_id, handleGenerateUpdate, { mockTopic: topic });
     } catch (err) {
+      if (err && err.status === 409 && err.gpuStatus) setGpuStatus(err.gpuStatus);
+      if (err && err.status === 401) setNeedsCode(true);
       setError(err.message);
       setFlowStep('input');
+    }
+  }
+
+  // "Stop" button: the backend halts the run between diffusion steps and frees the GPU.
+  async function stopGenerate() {
+    const { id, ownerToken } = jobRef.current;
+    if (!id || !ownerToken || stoppingRef.current) return;
+    stoppingRef.current = true;
+    setStopping(true);
+    try {
+      await cancelJob(id, ownerToken);
+    } catch (err) {
+      stoppingRef.current = false;
+      setStopping(false);
+      setNotice(err.message || 'Could not stop the run.');
     }
   }
 
@@ -335,7 +458,9 @@ export default function App({ initialNotice = '' }) {
   function resetFlow() {
     stopPolling();
     writeActiveJob(null);
-    jobRef.current = { id: null, topic: '', scheduleId: null };
+    stoppingRef.current = false;
+    setStopping(false);
+    jobRef.current = { id: null, topic: '', scheduleId: null, ownerToken: null };
     setFlowStep('input');
     setPrompt('');
     setError('');
@@ -357,19 +482,23 @@ export default function App({ initialNotice = '' }) {
     setView('new');
   }
 
-  // A scheduled item the backend has generated (or is generating): pick it up in the normal flow.
-  function reviewScheduled(item) {
-    if (busy || !item.job_id) return;
+  // A run the backend already has (a scheduled item, or one from History): open it
+  // in the normal flow. A finished one goes straight to review; a running one shows progress.
+  function openJob(jobId, topic, scheduleId = null) {
+    if (busy || !jobId) return;
     if (flowStep === 'review' && !window.confirm('Discard the post that is waiting for review and open this one instead?')) return;
     resetFlow();
-    jobRef.current = { id: item.job_id, topic: item.topic, scheduleId: item.id };
-    writeActiveJob({ jobId: item.job_id, prompt: item.topic, scheduleId: item.id, phase: 'generating' });
-    setPrompt(item.topic);
-    setActiveScheduleId(item.id);
+    jobRef.current = { id: jobId, topic, scheduleId, ownerToken: null };
+    writeActiveJob({ jobId, prompt: topic, scheduleId, phase: 'generating' });
+    setPrompt(topic);
+    setActiveScheduleId(scheduleId);
     setFlowStep('progress');
-    cancelPollRef.current = pollJob(item.job_id, handleGenerateUpdate);
+    cancelPollRef.current = pollJob(jobId, handleGenerateUpdate);
     setView('new');
   }
+
+  const reviewScheduled = (item) => openJob(item.job_id, item.topic, item.id);
+  const openRun = (run) => openJob(run.id, run.topic, null);
 
   function handleConnectionChanged() {
     setApiVersion((v) => v + 1);
@@ -385,10 +514,23 @@ export default function App({ initialNotice = '' }) {
   const updateScheduleItem = (id, patch) => commitSchedule((prev) => prev.map((item) => (item.id === id ? { ...item, ...patch } : item)));
   const removeScheduleItem = (id) => commitSchedule((prev) => prev.filter((item) => item.id !== id));
 
+  if (showGate) {
+    return <ConnectGate state={connState} lastCheckAt={lastCheckAt} onChanged={handleConnectionChanged} />;
+  }
+
   return (
     <div className="vc-shell">
       <a className="vc-skip" href="#main">Skip to content</a>
-      <Sidebar view={view} onNavigate={setView} backendOnline={backendOnline} mockMode={mockMode} dueCount={attentionCount} />
+      <Sidebar
+        view={view}
+        onNavigate={setView}
+        backendOnline={backendOnline}
+        mockMode={mockMode}
+        dueCount={attentionCount}
+        gpuStatus={gpuStatus}
+        needsCode={needsCode}
+        gpuIsMine={Boolean(gpuStatus && gpuStatus.busy && !gpuBusyByOther)}
+      />
 
       <main id="main" className="vc-main">
         <div className="vc-main-inner">
@@ -402,6 +544,8 @@ export default function App({ initialNotice = '' }) {
                   error={error}
                   backendOnline={backendOnline}
                   mockMode={mockMode}
+                  gpuStatus={gpuBusyByOther ? gpuStatus : null}
+                  needsCode={needsCode}
                   onOpenSettings={() => setView('settings')}
                   dueItems={dueItems}
                   readyItems={readyItems}
@@ -411,7 +555,17 @@ export default function App({ initialNotice = '' }) {
                   onOpenSchedule={() => setView('schedule')}
                 />
               )}
-              {flowStep === 'progress' && <ProgressView prompt={prompt} stage={stage} overallPercent={progress} stalled={stalled} />}
+              {flowStep === 'progress' && (
+                <ProgressView
+                  prompt={prompt}
+                  stage={stage}
+                  overallPercent={progress}
+                  stalled={stalled}
+                  canStop={Boolean(jobRef.current.ownerToken) && !mockMode}
+                  stopping={stopping}
+                  onStop={stopGenerate}
+                />
+              )}
               {flowStep === 'review' && (
                 <ReviewView
                   caption={caption}
@@ -428,7 +582,16 @@ export default function App({ initialNotice = '' }) {
           )}
 
           <Suspense fallback={<div className="vc-loading">Loading&hellip;</div>}>
-            {view === 'history' && <HistoryView posts={posts} state={postsState} onRetry={() => loadPosts()} />}
+            {view === 'history' && (
+              <HistoryView
+                posts={posts}
+                state={postsState}
+                onRetry={() => loadPosts()}
+                onOpenRun={openRun}
+                busy={busy}
+                needsCode={needsCode}
+              />
+            )}
             {view === 'schedule' && (
               <ScheduleView
                 items={schedule}

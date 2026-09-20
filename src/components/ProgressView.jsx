@@ -20,12 +20,19 @@ function stepStatus(step, currentStage) {
   return 'pending';
 }
 
-export default function ProgressView({ prompt, stage, overallPercent, stalled = false }) {
+export default function ProgressView({ prompt, stage, overallPercent, stalled = false, canStop = false, stopping = false, onStop }) {
   return (
     <div className="card" style={{ maxWidth: 640, padding: 'clamp(22px, 5vw, 36px) clamp(20px, 5vw, 40px)' }}>
       <div className="card-kicker" style={{ color: 'var(--color-accent-700)' }}>Generating</div>
       <div className="card-title" style={{ fontSize: 24, marginBottom: 6 }}>Creating your post</div>
       <div style={{ fontSize: '14.5px', color: 'rgba(32,31,29,.6)', marginBottom: 26, overflowWrap: 'anywhere' }}>&ldquo;{prompt}&rdquo;</div>
+
+      {canStop && (
+        <div className="vc-alert vc-alert-accent" role="note" style={{ marginBottom: 22 }}>
+          <span className="vc-alert-dot" />
+          <div>Keep this page open. If you close it before the video finishes, the run is stopped and the GPU is freed for the next person.</div>
+        </div>
+      )}
 
       {stalled && (
         <div className="vc-alert vc-alert-error" role="alert" style={{ marginBottom: 22 }}>
@@ -51,6 +58,14 @@ export default function ProgressView({ prompt, stage, overallPercent, stalled = 
       >
         <div style={{ height: '100%', background: 'var(--color-accent)', borderRadius: 3, width: `${overallPercent}%`, transition: 'width .3s ease' }} />
       </div>
+
+      {canStop && (
+        <div style={{ marginBottom: 6 }}>
+          <button type="button" className="btn btn-secondary" onClick={onStop} disabled={stopping}>
+            {stopping ? 'Stopping\u2026' : 'Stop generation'}
+          </button>
+        </div>
+      )}
 
       {STEPS.map((step, i) => {
         const status = stepStatus(step, stage);

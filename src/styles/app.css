@@ -140,3 +140,30 @@
 .vc-cal-chip.is-ready { background: color-mix(in srgb, #3fb96f 16%, transparent); color: #1d6b3a; }
 .vc-cal-chip.is-generating { background: var(--color-accent-200); color: var(--color-accent-900); }
 .vc-cal-chip.is-failed { background: color-mix(in srgb, #c0392b 10%, transparent); color: #8a2f1f; }
+
+/* — multi-visitor: GPU status, meters, connect gate — */
+.vc-status-wrap { margin-top: auto; padding-top: 20px; border-top: 1px solid rgba(255, 255, 255, .12); display: flex; flex-direction: column; gap: 12px; }
+.vc-status-wrap .vc-status { margin: 0; padding: 0; border: 0; }
+.vc-gpu { display: flex; align-items: center; gap: 8px; }
+.vc-gpu-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; background: #bab6b6; }
+.vc-gpu-dot.is-busy { background: #b68235; animation: vc-pulse 1.4s ease-in-out infinite; }
+@keyframes vc-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+
+.vc-meter { height: 5px; border-radius: 3px; background: var(--color-neutral-200); overflow: hidden; margin-top: 10px; }
+.vc-meter > div { height: 100%; background: var(--color-accent); border-radius: 3px; transition: width .4s ease; }
+
+.vc-run-note { margin-top: 10px; font-size: 12.5px; line-height: 1.5; color: rgba(32, 31, 29, .6); overflow-wrap: anywhere; }
+.vc-btn-small { padding: 7px 12px; font-size: 13px; text-decoration: none; }
+
+.vc-gate { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 32px 16px; box-sizing: border-box; font-family: var(--font-body); }
+.vc-gate-card { width: 100%; max-width: 520px; }
+.vc-gate-steps { margin: 0 0 22px; padding-left: 20px; font-size: 14.5px; line-height: 1.7; color: rgba(32, 31, 29, .75); }
+.vc-gate-live { display: flex; align-items: center; gap: 10px; font-size: 13px; color: rgba(32, 31, 29, .6); }
+.vc-gate-pulse { width: 8px; height: 8px; border-radius: 50%; background: var(--color-accent); animation: vc-pulse 1.4s ease-in-out infinite; flex: none; }
+
+@media (max-width: 860px) {
+  .vc-status-wrap { margin: 0; padding: 0; border: 0; order: 2; flex-direction: row; align-items: center; gap: 14px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .vc-gpu-dot.is-busy, .vc-gate-pulse { animation: none; }
+}
