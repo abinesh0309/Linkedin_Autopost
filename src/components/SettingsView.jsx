@@ -16,7 +16,6 @@ export default function SettingsView({ onChanged, onSaved }) {
   const [code, setCode] = useState(getAccessCode());
   const [status, setStatus] = useState(null); // null | 'checking' | 'ok' | 'fail'
   const [statusDetail, setStatusDetail] = useState('');
-  const [copied, setCopied] = useState(false);
 
   // Validates + stores the URL; returns the clean URL or null on invalid input.
   function commit() {
@@ -77,19 +76,6 @@ export default function SettingsView({ onChanged, onSaved }) {
     if (onChanged) onChanged();
   }
 
-  async function copyLink() {
-    const clean = normalizeApiUrl(url);
-    if (!clean.ok || !clean.url) return;
-    const link = `${window.location.origin}${window.location.pathname}?api=${encodeURIComponent(clean.url)}`;
-    try {
-      await navigator.clipboard.writeText(link);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    } catch {
-      window.prompt('Copy this link:', link);
-    }
-  }
-
   const hasUrl = Boolean(url.trim());
 
   return (
@@ -99,10 +85,7 @@ export default function SettingsView({ onChanged, onSaved }) {
         Backend connection
       </h1>
       <p style={{ fontFamily: 'var(--font-body)', fontSize: '15px', lineHeight: 1.6, color: 'rgba(32,31,29,.65)', margin: '0 0 26px', maxWidth: 580 }}>
-        Paste the <strong>Public API URL</strong> printed by the last cell (section 6) of the
-        Kaggle notebook. It changes every time the Kaggle session restarts (unless you use a reserved
-        ngrok domain), so re-paste it here when that happens. It is saved in this browser and takes
-        effect immediately.{requireBackend ? '' : ' Leave it empty to explore the app in demo mode with simulated data.'}
+        Paste the <strong>Public API URL</strong> printed by the server. 
       </p>
 
       <label htmlFor="api-url" style={{ display: 'block', fontFamily: 'var(--font-heading)', fontSize: 13, fontWeight: 600, marginBottom: 8, color: 'var(--color-text)' }}>
@@ -150,25 +133,6 @@ export default function SettingsView({ onChanged, onSaved }) {
         </div>
       )}
 
-      <div className="hr" />
-
-      <div className="card-kicker" style={{ color: 'var(--color-accent-700)', marginBottom: 8 }}>Open on another device</div>
-      <p style={{ fontSize: '14px', lineHeight: 1.6, color: 'rgba(32,31,29,.65)', maxWidth: 580, margin: '0 0 12px' }}>
-        Copy a link that opens this site already connected to the backend above &mdash; useful on
-        your phone or for sending a reviewer a working link while the notebook is running.
-      </p>
-      <button className="btn btn-secondary" onClick={copyLink} disabled={!hasUrl}>
-        {copied ? 'Link copied' : 'Copy connection link'}
-      </button>
-
-      <div className="hr" />
-
-      <div className="card-kicker" style={{ color: 'var(--color-accent-700)', marginBottom: 8 }}>If you see &ldquo;Failed to fetch&rdquo;</div>
-      <p style={{ fontSize: '14px', lineHeight: 1.6, color: 'rgba(32,31,29,.65)', maxWidth: 580 }}>
-        This almost always means the Kaggle notebook (or its API cell) isn&apos;t running anymore, the
-        URL above is stale from a previous restart, or the browser blocked the request. Use Test
-        connection to find out which before regenerating a post.
-      </p>
     </div>
   );
 }
