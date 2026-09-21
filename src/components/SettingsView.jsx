@@ -102,18 +102,7 @@ export default function SettingsView({ onChanged, onSaved }) {
         style={inputStyle}
       />
 
-      <label htmlFor="access-code" style={{ display: 'block', fontFamily: 'var(--font-heading)', fontSize: 13, fontWeight: 600, marginBottom: 8, color: 'var(--color-text)' }}>
-        Access code <span style={{ fontWeight: 400, color: 'rgba(32,31,29,.55)' }}>(only if the backend has one set)</span>
-      </label>
-      <input
-        id="access-code"
-        className="vc-textarea"
-        type="password"
-        value={code}
-        onChange={(e) => setCode(e.target.value)}
-        autoComplete="off"
-        style={inputStyle}
-      />
+      
 
       <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginBottom: 20, flexWrap: 'wrap' }}>
         <button className="btn btn-primary" onClick={handleSave}>Save</button>
